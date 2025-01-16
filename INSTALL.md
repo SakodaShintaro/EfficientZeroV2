@@ -1,13 +1,23 @@
 # Installation
 
-## Prerequisites & Installation
+## メモ
+
+dockerディレクトリで `run.sh` を実行して以降の手順
 
 ```bash
-conda create -n ezv2 python=3.8
-conda activate ezv2
-pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2
-pip install -r requirements.txt
+echo 'export PATH=$PATH:/home/sakoda/.local/bin' >> ~/.bashrc
+source ~/.bashrc
+
+sudo apt-get update && sudo apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0
+
+python -m pip install --upgrade pip
+cd ~/work/EfficientZeroV2
+pip3 install -r requirements.txt
 ```
+
+## Prerequisites & Installation
 
 Before starting training, you need to build the c++/cython style external packages. 
 ```
