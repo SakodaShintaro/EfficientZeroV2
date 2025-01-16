@@ -22,3 +22,4 @@ imageio[pyav]
 ray==1.0.0
 torchrl==0.1.0
 git+https://gitclone.com/github.com/denisyarats/dmc2gym.git
+colorednoise
