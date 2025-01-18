@@ -26,29 +26,15 @@ Before starting training, you need to build the c++/cython style external packag
 ```bash
 cd ez/mcts/ctree
 bash make.sh
-cd -
-```
-
-## Some Tips
-
-Install `reference` version 0.31.0 (version 0.30.2 fails to import `referencing.jsonschema`):
-
-```bash
-pip install reference==0.31.0
-```
-
-## Compilation Instructions
-
-1. In addition to compiling `ctree`, also compile `ctree_v2` (If you find the training process is stuck, this issue exists in some cases.):
-
-```bash
-cd ez/mcts/ctree_v2
+cd ../ctree_v2
 sh make.sh
-```
-
-1. In addition to compiling `ctree`, also compile `ori_ctree` :
-
-```bash
 cd ../ori_ctree/
 sh make.sh
+```
+
+## Train
+
+```bash
+cd ../../../
+bash ./scripts/train.sh
 ```
