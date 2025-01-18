@@ -41,13 +41,7 @@ def main(config):
         config.actors.batch_worker = 1
         config.data.num_envs = 1
 
-    if config.ddp.world_size > 1:
-        mp.spawn(start_ddp_trainer, args=(config,), nprocs=config.ddp.world_size)
-    else:
-        start_ddp_trainer(0, config)
-
-
-def start_ddp_trainer(rank, config):
+    rank = 0
     assert rank >= 0
     print(f'start {rank} train worker...')
     agent = agents.names[config.agent_name](config)         # update config
@@ -64,17 +58,13 @@ def start_ddp_trainer(rank, config):
     # set log
 
     if rank == 0:
-        # wandb logger
-        if config.ddp.training_size == 1:
-            wandb_name = config.env.game + '-' + config.wandb.tag
-            print(f'wandb_name={wandb_name}')
-            logger = wandb.init(
-                name=wandb_name,
-                project=config.wandb.project,
-                # config=config,
-            )
-        else:
-            logger = None
+        wandb_name = config.env.game + '-' + config.wandb.tag
+        print(f'wandb_name={wandb_name}')
+        logger = wandb.init(
+            name=wandb_name,
+            project=config.wandb.project,
+            # config=config,
+        )
         # file logger
         log_path = os.path.join(config.save_path, 'logs')
         os.makedirs(log_path, exist_ok=True)
@@ -105,19 +95,7 @@ def train(rank, agent, manager, logger, config):
     # train
     storage_server, replay_buffer_server, watchdog_server, batch_storage = server_lst
 
-    if config.ddp.training_size == 1:
-        final_weights, final_model = agent.train(rank, replay_buffer_server, storage_server, batch_storage, logger)
-    else:
-        from ez.agents.base import train_ddp
-        time.sleep(1)
-        train_workers = [
-            train_ddp.remote(
-                agent, rank * config.ddp.training_size + rank_i,
-                replay_buffer_server, storage_server, batch_storage, logger
-            ) for rank_i in range(config.ddp.training_size)
-        ]
-        time.sleep(1)
-        final_weights, final_model = ray.get(train_workers)
+    final_weights, final_model = agent.train(rank, replay_buffer_server, storage_server, batch_storage, logger)
 
     epi_scores = eval(agent, final_model, 10, Path(config.save_path) / 'evaluation' / 'final', config,
                            max_steps=27000, use_pb=False, verbose=config.eval.verbose)

@@ -349,13 +349,6 @@ def init_logger(base_path):
         logger.setLevel(logging.DEBUG)
 
 
-def get_ddp_model_weights(ddp_model):
-    """
-    Get weights of a DDP model
-    """
-    return {'.'.join(k.split('.')[2:]): v.cpu() for k, v in ddp_model.state_dict().items()}
-
-
 def allocate_gpu(rank, gpu_lst, worker_name):
     # set the gpu it resides on according to remaining memory
     time.sleep(3)

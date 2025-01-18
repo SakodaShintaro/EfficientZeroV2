@@ -22,25 +22,11 @@ from tqdm.auto import tqdm
 from torch.nn import L1Loss
 from torch.cuda.amp import autocast as autocast
 from torch.cuda.amp import GradScaler as GradScaler
-from torch.nn.parallel import DistributedDataParallel as DDP
 
-from ez.utils.format import get_ddp_model_weights, DiscreteSupport, symexp
+from ez.utils.format import DiscreteSupport, symexp
 from ez.utils.loss import kl_loss, cosine_similarity_loss, continuous_loss, symlog_loss, Value_loss
 from ez.data.trajectory import GameTrajectory
 from ez.data.augmentation import Transforms
-
-def DDP_setup(**kwargs):
-    # set master nod
-    os.environ['MASTER_ADDR'] = kwargs.get('address')
-    # os.environ['MASTER_PORT'] = kwargs.get('port')
-
-    # initialize the process group
-    try:
-        dist.init_process_group('nccl', rank=kwargs.get('rank'), world_size=kwargs.get('world_size') * kwargs.get('training_size'))
-    except:
-        dist.init_process_group('gloo', rank=kwargs.get('rank'), world_size=kwargs.get('world_size') * kwargs.get('training_size'))
-
-    print(f'DDP backend={dist.get_backend()}')
 
 class Agent:
     def __init__(self, config):
@@ -50,7 +36,6 @@ class Agent:
         self.input_shape = None
         self.action_space_size = None
         self._update = False
-        self.use_ddp = True if config.ddp.world_size > 1 or config.ddp.training_size > 1 else False
 
     def update_config(self):
         raise NotImplementedError
@@ -86,10 +71,6 @@ class Agent:
             storage.set_weights.remote(weights, 'latest')
             model.load_state_dict(weights)
             target_model.load_state_dict(weights)
-
-        # DDP
-        if self.use_ddp:
-            model = DDP(model, device_ids=[rank])
 
         if int(torch.__version__[0]) == 2:
             model = torch.compile(model)
@@ -195,10 +176,6 @@ class Agent:
             scaler = scalers[0]
 
             loss_data, other_scalar, other_distribution = log_data
-
-            # TODO: maybe this barrier can be removed
-            if self.config.ddp.training_size > 1 or self.config.ddp.world_size > 1:
-                dist.barrier()
 
             # save models
             if is_main_process and step_count % self.config.train.save_ckpt_interval == 0:
@@ -567,10 +544,7 @@ class Agent:
         return scalers, (loss_data, other_scalar, other_distribution)
 
     def get_weights(self, model):
-        if self.use_ddp:
-            return get_ddp_model_weights(model)
-        else:
-            return model.get_weights()
+        return model.get_weights()
 
     def adjust_lr(self, optimizer, step_count, scheduler):
         lr_warm_step = int(self.config.train.training_steps * self.config.optimizer.lr_warm_up)
@@ -670,256 +644,3 @@ class Agent:
             return True
         else:
             return False
-
-
-@ray.remote(num_gpus=0.55)
-def train_ddp(agent, rank, replay_buffer, storage, batch_storage, logger):
-    print(f'training_rank={rank}')
-    if rank == 0:
-        wandb_name = agent.config.env.game + '-' + agent.config.wandb.tag
-        logger = wandb.init(
-            name=wandb_name,
-            project=agent.config.wandb.project,
-            # config=config,
-        )
-    assert agent._update
-    # update image augmentation transform
-    agent.update_augmentation_transform()
-
-    # save path
-    model_path = Path(agent.config.save_path) / 'models'
-    model_path.mkdir(parents=True, exist_ok=True)
-
-    is_main_process = (rank == 0)
-    if is_main_process:
-        train_logger = logging.getLogger('Train')
-        eval_logger = logging.getLogger('Eval')
-
-        train_logger.info('config: {}'.format(agent.config))
-        train_logger.info('save model in: {}'.format(model_path))
-
-    # prepare model
-    model = agent.build_model().cuda()
-    target_model = agent.build_model().cuda()
-    # load model
-    load_path = agent.config.train.load_model_path
-    if os.path.exists(load_path):
-        if is_main_process:
-            train_logger.info('resume model from path: {}'.format(load_path))
-        weights = torch.load(load_path)
-        storage.set_weights.remote(weights, 'self_play')
-        storage.set_weights.remote(weights, 'reanalyze')
-        storage.set_weights.remote(weights, 'latest')
-        model.load_state_dict(weights)
-        target_model.load_state_dict(weights)
-
-    # DDP
-    if agent.use_ddp:
-        DDP_setup(rank=rank, world_size=agent.config.ddp.world_size, training_size=agent.config.ddp.training_size, address='127.0.0.1')
-        model = DDP(model, device_ids=[rank])
-
-    if int(torch.__version__[0]) == 2:
-        model = torch.compile(model)
-        target_model = torch.compile(target_model)
-    model.train()
-    target_model.eval()
-
-    # optimizer
-    if agent.config.optimizer.type == 'SGD':
-        optimizer = optim.SGD(model.parameters(),
-                              lr=agent.config.optimizer.lr,
-                              weight_decay=agent.config.optimizer.weight_decay,
-                              momentum=agent.config.optimizer.momentum)
-    elif agent.config.optimizer.type == 'Adam':
-        optimizer = optim.Adam(model.parameters(),
-                               lr=agent.config.optimizer.lr,
-                               weight_decay=agent.config.optimizer.weight_decay)
-    elif agent.config.optimizer.type == 'AdamW':
-        optimizer = optim.AdamW(model.parameters(),
-                                lr=agent.config.optimizer.lr,
-                                weight_decay=agent.config.optimizer.weight_decay)
-    else:
-        raise NotImplementedError
-
-    if agent.config.optimizer.lr_decay_type == 'cosine':
-        max_steps = agent.config.train.training_steps - int(agent.config.train.training_steps * agent.config.optimizer.lr_warm_up)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_steps * 3, eta_min=0)
-    elif agent.config.optimizer.lr_decay_type == 'full_cosine':
-        max_steps = agent.config.train.training_steps - int(agent.config.train.training_steps * agent.config.optimizer.lr_warm_up)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_steps // 2, eta_min=0)
-    else:
-        scheduler = None
-
-    scaler = GradScaler()
-
-    # wait until collecting enough data to start
-    while not (ray.get(replay_buffer.get_transition_num.remote()) >= agent.config.train.start_transitions):
-        time.sleep(1)
-        pass
-    print('[Train] Begin training...')
-
-    # set signals for other workers
-    if is_main_process:
-        storage.set_start_signal.remote()
-    step_count = 0
-
-    # Note: the interval of the current model and the target model is between x and 2x. (x = target_model_interval)
-    # recent_weights is the param of the target model
-    recent_weights = agent.get_weights(model)
-
-    # some logs
-    total_time = 0
-    total_steps = agent.config.train.training_steps + agent.config.train.offline_training_steps
-    if is_main_process:
-        pb = tqdm(np.arange(total_steps), leave=True)
-
-    # while loop
-    self_play_reteurn = 0.
-    traj_num, transition_num = 0, 0
-    eval_score, eval_best_score = 0., 0.
-    while not agent.is_finished(step_count):
-        start_time = time.time()
-
-        # obtain a batch
-        batch = batch_storage.pop()
-        end_time1 = time.time()
-        if batch is None:
-            time.sleep(0.3)
-            # print('batch is None')
-            continue
-
-        # adjust learning rate
-        if is_main_process:
-            storage.increase_counter.remote()
-        lr = agent.adjust_lr(optimizer, step_count, scheduler)
-
-        if is_main_process and step_count % 30 == 0:
-            latest_weights = agent.get_weights(model)
-            ray.get(storage.set_weights.remote(latest_weights, 'latest'))
-
-        # update model for agent-play
-        if is_main_process and step_count % agent.config.train.self_play_update_interval == 0:
-            weights = agent.get_weights(model)
-            storage.set_weights.remote(weights, 'self_play')
-
-        # update model for reanalyzing
-        if is_main_process and step_count % agent.config.train.reanalyze_update_interval == 0:
-            storage.set_weights.remote(recent_weights, 'reanalyze')
-            target_model.set_weights(recent_weights)
-            target_model.cuda()
-            target_model.eval()
-            recent_weights = agent.get_weights(model)
-
-
-        scalers, log_data = agent.update_weights(model.module, batch, optimizer, replay_buffer, scaler, step_count, target_model=target_model)
-        scaler = scalers[0]
-
-        loss_data, other_scalar, other_distribution = log_data
-
-        # TODO: maybe this barrier can be removed
-        if agent.config.ddp.training_size > 1 or agent.config.ddp.world_size > 1:
-            dist.barrier()
-
-        # save models
-        if is_main_process and step_count % agent.config.train.save_ckpt_interval == 0:
-            cur_model_path = model_path / 'model_{}.p'.format(step_count)
-            torch.save(agent.get_weights(model), cur_model_path)
-
-        end_time = time.time()
-        total_time += end_time - start_time
-
-        step_count += 1
-        avg_time = total_time / step_count
-        log_scalars = {}
-        log_distribution = {}
-
-        pb_interval = 50
-        if is_main_process and step_count % pb_interval == 0:
-            left_steps = (agent.config.train.training_steps + agent.config.train.offline_training_steps - step_count)
-            left_time = (left_steps * avg_time) / 3600
-            batch_queue_size = batch_storage.get_len()
-            train_log_str = '[Train] {}, step {}/{}, {:.3f}h left. lr={:.3f}, avg time={:.3f}s, batchQ={}, '\
-                            'agent-play return={:.3f}, collect {}/{:.3f}k, eval score={:.3f}/{:.3f}. '\
-                            'Loss: reward={:.3f}, value={:.3f}, policy={:.3f}, ' \
-                            'consistency={:.3f}, entropy={:.3f}'\
-                            ''.format(agent.config.env.game, step_count, total_steps, left_time, lr, avg_time,
-                                      batch_queue_size, self_play_reteurn, traj_num, transition_num / 1000,
-                                      eval_score, eval_best_score, loss_data['loss/value_prefix'],
-                                      loss_data['loss/value'], loss_data['loss/policy'],
-                                      loss_data['loss/consistency'], loss_data['loss/entropy'])
-            # print(f'target policy={batch[-1][-1][0, 0]}')
-            pb.set_description(train_log_str)
-
-            pb.update(pb_interval)
-
-            log_scalars.update({
-                'train/step_per_second (s)': end_time - start_time,
-                'train/total time (h)': total_time / 3600,
-                'train/avg time (s)': avg_time,
-                'train/lr': lr,
-                'train/queue size': batch_queue_size
-            })
-
-        if is_main_process and step_count % agent.config.log.log_interval == 0:
-            # train_logger.info(train_log_str)
-            # agent-play statistics
-            eval_scalar, remote_scalar, remote_distribution = ray.get(storage.get_log.remote())
-            log_scalars.update(remote_scalar)
-            log_distribution.update(remote_distribution)
-
-            if remote_scalar.get('self_play/episode_return'):
-                self_play_reteurn = remote_scalar.get('self_play/episode_return')
-            if len(eval_scalar) > 0:
-                # TODO: fix the counter issue
-                # logger.log(eval_scalar, eval_counter)
-                logger.log(eval_scalar, step_count)
-
-                eval_score = eval_scalar['eval/mean_score']
-                min_score, max_score = eval_scalar['eval/min_score'], eval_scalar['eval/max_score']
-                eval_counter, eval_best_score = ray.get([storage.get_eval_counter.remote(), storage.get_best_score.remote()])
-
-                eval_log_str = 'Eval {} at at step {}, score = {:.3f}(min: {:.3f}, max: {:.3f}), ' \
-                               'best score over past evaluation = {:.3f}' \
-                               ''.format(agent.config.env.game, eval_counter, eval_score, min_score, max_score,
-                                         eval_best_score)
-                eval_logger.info(eval_log_str)
-                print('[Eval] ', eval_log_str)
-
-            # replay statistics
-            traj_num, transition_num, total_priorities = ray.get([
-                replay_buffer.get_traj_num.remote(), replay_buffer.get_transition_num.remote(), replay_buffer.get_priorities.remote()
-            ])
-            log_scalars.update({
-                'buffer/total_episode_num': traj_num,
-                'buffer/total_transition_num': transition_num
-            })
-            log_distribution.update({
-                'dist/priorities_in_buffer': total_priorities,
-            })
-            log_distribution.update(other_distribution)
-            agent.log_hist(logger, log_distribution, step_count)
-
-        if step_count % 20000 == 0 and agent.config.train.periodic_reset:
-            print('-------------------------reset network------------------------------')
-            model = agent.periodic_reset_model(model)
-
-        # training statistics
-        log_scalars.update(loss_data)
-        log_scalars.update(other_scalar)
-        if is_main_process and step_count > 100 and step_count % 1000 == 0:
-            logger.log(log_scalars, step_count)
-
-        traj_num, transition_num, total_priorities = ray.get([
-            replay_buffer.get_traj_num.remote(), replay_buffer.get_transition_num.remote(),
-            replay_buffer.get_priorities.remote()
-        ])
-        log_distribution.update({
-            'dist/priorities_in_buffer': total_priorities,
-        })
-        log_distribution.update(other_distribution)
-
-
-    final_weights = agent.get_weights(model)
-    storage.set_weights.remote(final_weights, 'self_play')
-
-    return final_weights, model

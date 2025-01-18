@@ -35,13 +35,6 @@ wandb:
 
 augmentation: ['shift', 'intensity']
 
-# ddp
-ddp:
-  world_size: 1
-  training_size: 1
-  address: '127.0.0.1'
-  #  port: '12355'
-
 ray:
   single_process: False
 
