@@ -40,7 +40,7 @@ class Agent:
     def update_config(self):
         raise NotImplementedError
 
-    def train(self, rank, replay_buffer, storage, batch_storage, logger):
+    def train(self, replay_buffer, storage, batch_storage, logger):
         assert self._update
         # update image augmentation transform
         self.update_augmentation_transform()
@@ -49,13 +49,11 @@ class Agent:
         model_path = Path(self.config.save_path) / 'models'
         model_path.mkdir(parents=True, exist_ok=True)
 
-        is_main_process = (rank == 0)
-        if is_main_process:
-            train_logger = logging.getLogger('Train')
-            eval_logger = logging.getLogger('Eval')
+        train_logger = logging.getLogger('Train')
+        eval_logger = logging.getLogger('Eval')
 
-            train_logger.info('config: {}'.format(self.config))
-            train_logger.info('save model in: {}'.format(model_path))
+        train_logger.info('config: {}'.format(self.config))
+        train_logger.info('save model in: {}'.format(model_path))
 
         # prepare model
         model = self.build_model().cuda()
@@ -63,8 +61,7 @@ class Agent:
         # load model
         load_path = self.config.train.load_model_path
         if os.path.exists(load_path):
-            if is_main_process:
-                train_logger.info('resume model from path: {}'.format(load_path))
+            train_logger.info('resume model from path: {}'.format(load_path))
             weights = torch.load(load_path)
             storage.set_weights.remote(weights, 'self_play')
             storage.set_weights.remote(weights, 'reanalyze')
@@ -113,8 +110,7 @@ class Agent:
         print('[Train] Begin training...')
 
         # set signals for other workers
-        if is_main_process:
-            storage.set_start_signal.remote()
+        storage.set_start_signal.remote()
         step_count = 0
 
         # Note: the interval of the current model and the target model is between x and 2x. (x = target_model_interval)
@@ -124,8 +120,7 @@ class Agent:
         # some logs
         total_time = 0
         total_steps = self.config.train.training_steps + self.config.train.offline_training_steps
-        if is_main_process:
-            pb = tqdm(np.arange(total_steps), leave=True)
+        pb = tqdm(np.arange(total_steps), leave=True)
 
         # while loop
         self_play_reteurn = 0.
@@ -146,21 +141,20 @@ class Agent:
                 continue
 
             # adjust learning rate
-            if is_main_process:
-                storage.increase_counter.remote()
+            storage.increase_counter.remote()
             lr = self.adjust_lr(optimizer, step_count, scheduler)
 
-            if is_main_process and step_count % 30 == 0:
+            if step_count % 30 == 0:
                 latest_weights = self.get_weights(model)
                 storage.set_weights.remote(latest_weights, 'latest')
 
             # update model for self-play
-            if is_main_process and step_count % self.config.train.self_play_update_interval == 0:
+            if step_count % self.config.train.self_play_update_interval == 0:
                 weights = self.get_weights(model)
                 storage.set_weights.remote(weights, 'self_play')
 
             # update model for reanalyzing
-            if is_main_process and step_count % self.config.train.reanalyze_update_interval == 0:
+            if step_count % self.config.train.reanalyze_update_interval == 0:
                 storage.set_weights.remote(recent_weights, 'reanalyze')
                 target_model.set_weights(recent_weights)
                 target_model.cuda()
@@ -178,7 +172,7 @@ class Agent:
             loss_data, other_scalar, other_distribution = log_data
 
             # save models
-            if is_main_process and step_count % self.config.train.save_ckpt_interval == 0:
+            if step_count % self.config.train.save_ckpt_interval == 0:
                 cur_model_path = model_path / 'model_{}.p'.format(step_count)
                 torch.save(self.get_weights(model), cur_model_path)
 
@@ -191,7 +185,7 @@ class Agent:
             log_distribution = {}
 
             pb_interval = 50
-            if is_main_process and step_count % pb_interval == 0:
+            if step_count % pb_interval == 0:
                 left_steps = (self.config.train.training_steps + self.config.train.offline_training_steps - step_count)
                 left_time = (left_steps * avg_time) / 3600
                 batch_queue_size = batch_storage.get_len()
@@ -217,7 +211,7 @@ class Agent:
                     'train/queue size': batch_queue_size
                 })
 
-            if is_main_process and step_count % self.config.log.log_interval == 0:
+            if step_count % self.config.log.log_interval == 0:
                 # train_logger.info(train_log_str)
                 # self-play statistics
                 eval_scalar, remote_scalar, remote_distribution = ray.get(storage.get_log.remote())
@@ -275,11 +269,8 @@ class Agent:
             log_distribution.update(other_distribution)
 
 
-        if is_main_process:
-            final_weights = self.get_weights(model)
-            storage.set_weights.remote(final_weights, 'self_play')
-        else:
-            final_weights = None
+        final_weights = self.get_weights(model)
+        storage.set_weights.remote(final_weights, 'self_play')
 
         return final_weights, model
 

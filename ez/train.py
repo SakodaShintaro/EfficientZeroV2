@@ -41,9 +41,6 @@ def main(config):
         config.actors.batch_worker = 1
         config.data.num_envs = 1
 
-    rank = 0
-    assert rank >= 0
-    print(f'start {rank} train worker...')
     agent = agents.names[config.agent_name](config)         # update config
     manager = None
     num_gpus = torch.cuda.device_count()
@@ -54,58 +51,49 @@ def main(config):
         object_store_memory=30 * 1024 * 1024 * 1024,
         _memory=30 * 1024 * 1024 * 1024,
     )
-    set_seed(config.env.base_seed + rank >= 0)              # set seed
+    set_seed(config.env.base_seed)              # set seed
     # set log
 
-    if rank == 0:
-        wandb_name = config.env.game + '-' + config.wandb.tag
-        print(f'wandb_name={wandb_name}')
-        logger = wandb.init(
-            name=wandb_name,
-            project=config.wandb.project,
-            # config=config,
-        )
-        # file logger
-        log_path = os.path.join(config.save_path, 'logs')
-        os.makedirs(log_path, exist_ok=True)
-        init_logger(log_path)
-    else:
-        logger = None
+    wandb_name = config.env.game + '-' + config.wandb.tag
+    print(f'wandb_name={wandb_name}')
+    logger = wandb.init(
+        name=wandb_name,
+        project=config.wandb.project,
+        # config=config,
+    )
+    # file logger
+    log_path = os.path.join(config.save_path, 'logs')
+    os.makedirs(log_path, exist_ok=True)
+    init_logger(log_path)
 
     # train
-    final_weights = train(rank, agent, manager, logger, config)
+    final_weights = train(agent, manager, logger, config)
 
     # final evaluation
-    if rank == 0:
-        model = agent.build_model()
-        model.set_weights(final_weights)
-        save_path = Path(config.save_path) / 'recordings' / 'final'
+    model = agent.build_model()
+    model.set_weights(final_weights)
+    save_path = Path(config.save_path) / 'recordings' / 'final'
 
-        scores = eval(agent, model, config.train.eval_n_episode, save_path, config)
-        print('final score: ', np.mean(scores))
+    scores = eval(agent, model, config.train.eval_n_episode, save_path, config)
+    print('final score: ', np.mean(scores))
 
 
-def train(rank, agent, manager, logger, config):
-    # launch for the main process
-    if rank == 0:
-        workers, server_lst = start_workers(agent, manager, config)
-    else:
-        workers, server_lst = None, None
+def train(agent, manager, logger, config):
+    workers, server_lst = start_workers(agent, manager, config)
 
     # train
     storage_server, replay_buffer_server, watchdog_server, batch_storage = server_lst
 
-    final_weights, final_model = agent.train(rank, replay_buffer_server, storage_server, batch_storage, logger)
+    final_weights, final_model = agent.train(replay_buffer_server, storage_server, batch_storage, logger)
 
     epi_scores = eval(agent, final_model, 10, Path(config.save_path) / 'evaluation' / 'final', config,
                            max_steps=27000, use_pb=False, verbose=config.eval.verbose)
     print(f'final_mean_score={epi_scores.mean():.3f}')
 
     # join process
-    if rank == 0:
-        print(f'[main process] master worker finished')
-        time.sleep(1)
-        join_workers(workers, server_lst)
+    print(f'[main process] master worker finished')
+    time.sleep(1)
+    join_workers(workers, server_lst)
 
     # return
     dist.destroy_process_group()
