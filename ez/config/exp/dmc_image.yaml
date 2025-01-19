@@ -45,7 +45,7 @@ priority:
 train:
   load_model_path: ''
   batch_size: 256
-  training_steps: 200000        # 100 * 1000
+  training_steps: 100000        # 100 * 1000
   offline_training_steps: 20000     # 20 * 1000
   start_transitions: 2000       # 2 * 1000
 
