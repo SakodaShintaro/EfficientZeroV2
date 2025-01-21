@@ -57,7 +57,6 @@ class Agent:
 
         # prepare model
         model = self.build_model().cuda()
-        target_model = self.build_model().cuda()
         # load model
         load_path = self.config.train.load_model_path
         if os.path.exists(load_path):
@@ -67,13 +66,10 @@ class Agent:
             storage.set_weights.remote(weights, 'reanalyze')
             storage.set_weights.remote(weights, 'latest')
             model.load_state_dict(weights)
-            target_model.load_state_dict(weights)
 
         if int(torch.__version__[0]) == 2:
             model = torch.compile(model)
-            target_model = torch.compile(target_model)
         model.train()
-        target_model.eval()
 
         # optimizer
         if self.config.optimizer.type == 'SGD':
@@ -113,10 +109,6 @@ class Agent:
         storage.set_start_signal.remote()
         step_count = 0
 
-        # Note: the interval of the current model and the target model is between x and 2x. (x = target_model_interval)
-        # recent_weights is the param of the target model
-        recent_weights = self.get_weights(model)
-
         # some logs
         total_time = 0
         total_steps = self.config.train.training_steps + self.config.train.offline_training_steps
@@ -152,21 +144,14 @@ class Agent:
             if step_count % self.config.train.self_play_update_interval == 0:
                 weights = self.get_weights(model)
                 storage.set_weights.remote(weights, 'self_play')
-
-            # update model for reanalyzing
-            if step_count % self.config.train.reanalyze_update_interval == 0:
-                storage.set_weights.remote(recent_weights, 'reanalyze')
-                target_model.set_weights(recent_weights)
-                target_model.cuda()
-                target_model.eval()
-                recent_weights = self.get_weights(model)
+                storage.set_weights.remote(weights, 'reanalyze')
 
             if step_count % self.config.train.eval_interval == 0:
                 if eval_counter == prev_eval_counter:
                     time.sleep(1)
                     continue
 
-            scalers, log_data = self.update_weights(model, batch, optimizer, replay_buffer, scaler, step_count, target_model=target_model)
+            scalers, log_data = self.update_weights(model, batch, optimizer, replay_buffer, scaler, step_count)
             scaler = scalers[0]
 
             loss_data, other_scalar, other_distribution = log_data
@@ -305,8 +290,7 @@ class Agent:
         return model
 
     # @profile
-    def update_weights(self, model, batch, optimizer, replay_buffer, scaler, step_count, target_model=None):
-        target_model.eval()
+    def update_weights(self, model, batch, optimizer, replay_buffer, scaler, step_count):
         # init
         batch_size = self.config.train.batch_size
         image_channel = self.config.env.obs_shape[0] if self.config.env.image_based else self.config.env.obs_shape
@@ -501,7 +485,6 @@ class Agent:
 
         if self.config.model.noisy_net:
             model.value_policy_model.reset_noise()
-            target_model.value_policy_model.reset_noise()
 
         # log
         loss_data.update({
