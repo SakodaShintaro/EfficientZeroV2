@@ -15,7 +15,6 @@ from ez.worker.watchdog_worker import start_watchdog_server
 from ez.data.global_storage import GlobalStorage
 from ez.data.replay_buffer import ReplayBuffer
 from ez.worker.data_worker import start_data_worker
-from ez.worker.batch_worker import start_batch_worker, start_batch_worker_cpu, start_batch_worker_gpu
 from ez.worker.eval_worker import start_eval_worker
 from ez.utils.format import RayQueue, PreQueue
 
@@ -28,10 +27,6 @@ def start_workers(agent, manager, config):
     # global storage server
     storage_server = GlobalStorage.remote(agent.build_model(), agent.build_model(), agent.build_model())
     print('[main process] Global storage server has been started from main process.')
-
-    # batch queue
-    batch_storage = RayQueue(15, 20)
-    print('[main process] Batch storage has been initialized.')
 
     # replay buffer server
     replay_buffer_server = ReplayBuffer.remote(batch_size=config.train.batch_size,
@@ -55,11 +50,6 @@ def start_workers(agent, manager, config):
                     for rank in range(0, config.actors.data_worker)]
     print('[main process] Data workers have all been launched.')
 
-    # batch worker
-    batch_workers = [start_batch_worker(rank, agent, replay_buffer_server, storage_server, batch_storage, config)
-                     for rank in range(0, config.actors.batch_worker)]
-    print('[main process] Batch workers have all been launched.')
-
     # eval worker
     eval_worker = [start_eval_worker(agent, replay_buffer_server, storage_server, config)]
 
@@ -67,8 +57,8 @@ def start_workers(agent, manager, config):
         print(f'[main process] torch version is {torch.__version__}, enabled torch_compile.')
 
     # trainer (in current process)
-    worker_lst = [data_workers, batch_workers, eval_worker]
-    server_lst = [storage_server, replay_buffer_server, watchdog_server, batch_storage]
+    worker_lst = [data_workers, eval_worker]
+    server_lst = [storage_server, replay_buffer_server, watchdog_server]
 
     return worker_lst, server_lst
 

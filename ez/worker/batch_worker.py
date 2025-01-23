@@ -24,14 +24,12 @@ from ez.utils.format import formalize_obs_lst, DiscreteSupport, LinearSchedule, 
 from ez.data.trajectory import GameTrajectory
 from ez.mcts.cy_mcts import Gumbel_MCTS
 
-@ray.remote(num_gpus=0.03)
 # @ray.remote(num_gpus=0.14)
 class BatchWorker(Worker):
-    def __init__(self, rank, agent, replay_buffer, storage, batch_storage, config):
+    def __init__(self, rank, agent, replay_buffer, storage, config):
         super().__init__(rank, agent, replay_buffer, storage, config)
 
         self.model_update_interval = config.train.reanalyze_update_interval
-        self.batch_storage = batch_storage
 
         self.beta_schedule = LinearSchedule(self.total_steps, initial_p=config.priority.priority_prob_beta, final_p=1.0)
         self.total_transitions = self.config.data.total_transitions
@@ -84,9 +82,17 @@ class BatchWorker(Worker):
             traj_lst.append(traj)
         return traj_lst
 
-    def run(self):
-        trained_steps = 0
+    def set_weights(self, weights):
+        assert self.model
+        self.model.set_weights(weights)
+        self.model.cuda()
+        self.model.eval()
+        assert self.latest_model
+        self.latest_model.set_weights(weights)
+        self.latest_model.cuda()
+        self.latest_model.eval()
 
+    def init(self):
         # create the model for self-play data collection
         self.model = self.agent.build_model()
         self.latest_model = self.agent.build_model()
@@ -103,36 +109,9 @@ class BatchWorker(Worker):
         self.latest_model.eval()
         self.resume_model()
 
-        # wait for starting to train
-        while not ray.get(self.storage.get_start_signal.remote()):
-            time.sleep(0.5)
-
-        # begin to make batch
-        prev_trained_steps = -10
-        while not self.is_finished(trained_steps):
-            trained_steps = ray.get(self.storage.get_counter.remote())
-            if self.config.ray.single_process:
-                if trained_steps <= prev_trained_steps:
-                    time.sleep(0.1)
-                    continue
-                prev_trained_steps = trained_steps
-                print(f'reanalyze[{self.rank}] makes batch at step {trained_steps}')
-            # get the fresh model weights
-            self.get_recent_model(trained_steps, 'reanalyze')
-            self.get_latest_model(trained_steps, 'latest')
-            # if self.config.model.noisy_net:
-            #     self.model.value_policy_model.reset_noise()
-
-            start_time = time.time()
-            ray_time = self.make_batch(trained_steps, self.cnt)
-            self.cnt += 1
-            end_time = time.time()
-            # if self.cnt % 100 == 0:
-            #     print(f'make batch time={end_time-start_time:.3f}s, ray get time={ray_time:.3f}s')
-
     # @torch.no_grad()
     # @profile
-    def make_batch(self, trained_steps, cnt, real_time=False):
+    def make_batch(self, trained_steps, cnt):
         beta = self.beta_schedule.value(trained_steps)
         batch_size = self.batch_size
 
@@ -268,13 +247,7 @@ class BatchWorker(Worker):
             'batch_worker/td_step': np.mean(td_steps)
         })
 
-        if real_time:
-            return batch
-        else:
-            # push into batch storage
-            self.batch_storage.push(batch)
-
-        return ray_time
+        return batch
 
     # @profile
     def prepare_reward_value_gae_faster(self, traj_lst, transition_pos_lst, indices_lst, collected_transitions, trained_steps):
@@ -999,25 +972,3 @@ class BatchWorker(Worker):
             state_lst = torch.cat(state_lst)
             policy_lst = torch.cat(policy_lst)
         return state_lst, value_lst, policy_lst
-
-
-# ======================================================================================================================
-# batch worker
-# ======================================================================================================================
-def start_batch_worker(rank, agent, replay_buffer, storage, batch_storage, config):
-    """
-    Start a GPU batch worker. Call this method remotely.
-    """
-    worker = BatchWorker.remote(rank, agent, replay_buffer, storage, batch_storage, config)
-    print(f"[Batch worker GPU] Starting batch worker GPU {rank} at process {os.getpid()}.")
-    worker.run.remote()
-
-def start_batch_worker_cpu(rank, agent, replay_buffer, storage, prebatch_storage, config):
-    worker = BatchWorker_CPU.remote(rank, agent, replay_buffer, storage, prebatch_storage, config)
-    print(f"[Batch worker CPU] Starting batch worker CPU {rank} at process {os.getpid()}.")
-    worker.run.remote()
-
-def start_batch_worker_gpu(rank, agent, replay_buffer, storage, prebatch_storage, batch_storage, config):
-    worker = BatchWorker_GPU.remote(rank, agent, replay_buffer, storage, prebatch_storage, batch_storage, config)
-    print(f"[Batch worker GPU] Starting batch worker GPU {rank} at process {os.getpid()}.")
-    worker.run.remote()

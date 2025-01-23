@@ -27,6 +27,7 @@ from ez.utils.format import DiscreteSupport, symexp
 from ez.utils.loss import kl_loss, cosine_similarity_loss, continuous_loss, symlog_loss, Value_loss
 from ez.data.trajectory import GameTrajectory
 from ez.data.augmentation import Transforms
+from ez.worker.batch_worker import BatchWorker
 
 class Agent:
     def __init__(self, config):
@@ -40,10 +41,13 @@ class Agent:
     def update_config(self):
         raise NotImplementedError
 
-    def train(self, replay_buffer, storage, batch_storage, logger):
+    def train(self, replay_buffer, storage, logger):
         assert self._update
         # update image augmentation transform
         self.update_augmentation_transform()
+
+        batch_worker = BatchWorker(rank=0, agent=self, replay_buffer=replay_buffer, storage=storage, config=self.config)
+        batch_worker.init()
 
         # save path
         model_path = Path(self.config.save_path) / 'models'
@@ -125,7 +129,7 @@ class Agent:
             start_time = time.time()
 
             # obtain a batch
-            batch = batch_storage.pop()
+            batch = batch_worker.make_batch(step_count, step_count)
             end_time1 = time.time()
             if batch is None:
                 time.sleep(0.3)
@@ -145,6 +149,7 @@ class Agent:
                 weights = self.get_weights(model)
                 storage.set_weights.remote(weights, 'self_play')
                 storage.set_weights.remote(weights, 'reanalyze')
+                batch_worker.set_weights(latest_weights)
 
             if step_count % self.config.train.eval_interval == 0:
                 if eval_counter == prev_eval_counter:
@@ -173,13 +178,12 @@ class Agent:
             if step_count % pb_interval == 0:
                 left_steps = (self.config.train.training_steps + self.config.train.offline_training_steps - step_count)
                 left_time = (left_steps * avg_time) / 3600
-                batch_queue_size = batch_storage.get_len()
-                train_log_str = '[Train] {}, step {}/{}, {:.3f}h left. lr={:.3f}, avg time={:.3f}s, batchQ={}, '\
+                train_log_str = '[Train] {}, step {}/{}, {:.3f}h left. lr={:.3f}, avg time={:.3f}s, '\
                                 'self-play return={:.3f}, collect {}/{:.3f}k, eval score={:.3f}/{:.3f}. '\
                                 'Loss: reward={:.3f}, value={:.3f}, policy={:.3f}, ' \
                                 'consistency={:.3f}, entropy={:.3f}'\
                                 ''.format(self.config.env.game, step_count, total_steps, left_time, lr, avg_time,
-                                          batch_queue_size, self_play_reteurn, traj_num, transition_num / 1000,
+                                          self_play_reteurn, traj_num, transition_num / 1000,
                                           eval_score, eval_best_score, loss_data['loss/value_prefix'],
                                           loss_data['loss/value'], loss_data['loss/policy'],
                                           loss_data['loss/consistency'], loss_data['loss/entropy'])
@@ -193,7 +197,6 @@ class Agent:
                     'train/total time (h)': total_time / 3600,
                     'train/avg time (s)': avg_time,
                     'train/lr': lr,
-                    'train/queue size': batch_queue_size
                 })
 
             if step_count % self.config.log.log_interval == 0:

@@ -82,9 +82,9 @@ def train(agent, manager, logger, config):
     workers, server_lst = start_workers(agent, manager, config)
 
     # train
-    storage_server, replay_buffer_server, watchdog_server, batch_storage = server_lst
+    storage_server, replay_buffer_server, watchdog_server = server_lst
 
-    final_weights, final_model = agent.train(replay_buffer_server, storage_server, batch_storage, logger)
+    final_weights, final_model = agent.train(replay_buffer_server, storage_server, logger)
 
     epi_scores = eval(agent, final_model, 10, Path(config.save_path) / 'evaluation' / 'final', config,
                            max_steps=27000, use_pb=False, verbose=config.eval.verbose)
